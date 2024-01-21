@@ -26,10 +26,9 @@ data_raw <- response$features$attributes %>%
 
 data_raw %<>% mutate(address = paste(block_number, street_name, "Charlottesville VA"))
 
-#register_google(key = "AIzaSyCA7n3qDFsT0VgNCmgwk5bED9zg7dhMnNw", write = TRUE) #stored in .Renviron
 lon_lat <- geocode(data_raw$address) #takes ~10 minutes
 crime <- bind_cols(data_raw, lon_lat) %>%
-  filter(lon > -78.54, lat > 38.00)
+  filter(lon > -78.54, lat > 38.00 & lat < 38.08)
 
 # Get census block data:
 census <- geojson_sf("US_Census_Tract_Area_2010.geojson") %>% 
@@ -44,17 +43,95 @@ ggplot(census) +
   geom_sf() + 
   guides(fill = guide_none()) #census base view
 
+# Filter to only census blocks:
+crime %<>% mutate(within = st_within(crime, census) %>% as.numeric()) 
+crime %<>% filter(!is.na(within))
+
 
 ggplot(crime) +
   geom_sf(alpha = .1, jitter = .1) +
-  geom_sf(data = census, fill = "blue", alpha = .5)
+  geom_sf(data = census, fill = "blue", alpha = .1)
+
+# Add streets
+library(remotes)
+library(osmdata)
+library(rvest)
+getbb("Charlottesville Virginia")
+
+
+# Get features
+big_streets <- getbb("Charlottesville Virginia") %>%
+  opq() %>%
+  add_osm_feature(key = "highway",
+                  value = c("motorway", "primary", "motorway_link", "primary_link")) %>%
+  osmdata_sf()
+
+med_streets <- getbb("Charlottesville Virginia") %>%
+  opq() %>%
+  add_osm_feature(key = "highway",
+                  value = c("secondary", "tertiary", "secondary_link", "tertiary_link")) %>%
+  osmdata_sf()
+
+small_streets <- getbb("Charlottesville Virginia") %>%
+  opq() %>%
+  add_osm_feature(key = "highway",
+                  value = c("residential", "living_street","unclassified",
+                            "service", "footway")) %>%
+  osmdata_sf()
+
+water <- getbb("Charlottesville Virginia") %>%
+  opq() %>%
+  add_osm_feature(key = "waterway", value = c("river", "lake")) %>%
+  osmdata_sf()
+
+railway <- getbb("Charlottesville Virginia") %>%
+  opq() %>%
+  add_osm_feature(key = "railway", value = "rail") %>%
+  osmdata_sf()
+
+ggplot(crime) +
+  geom_sf(alpha = .1, jitter = .1) +
+  geom_sf(data = census, fill = "blue", alpha = .1) +
+  geom_sf(data = water$osm_lines,
+          inherit.aes = FALSE,
+          color = "steelblue",
+          size = .8,
+          alpha = .3) +
+  geom_sf(data = railway$osm_lines,
+          inherit.aes = FALSE,
+          color = "black",
+          size = .2,
+          linetype="dotdash",
+          alpha = .5) +
+  geom_sf(data = med_streets$osm_lines,
+          inherit.aes = FALSE,
+          color = "black",
+          size = .3,
+          alpha = .5) +
+  geom_sf(data = big_streets$osm_lines,
+          inherit.aes = FALSE,
+          color = "black",
+          size = .5,
+          alpha = .6) +
+  coord_sf(xlim = c(-78.54, -78.44), 
+           ylim = c(38.0, 38.08),
+           expand = FALSE)
   
-  # filter to only cases within the census polygons
-  crime %<>% mutate(within = st_within(crime, census) %>% # returns the objectid for the block it falls within
-                      as.numeric()) # returns NA for those outside
+  
 
 
-                            
+
+ggplot() +
+  geom_sf(data = streets$osm_lines,
+          inherit.aes = FALSE,
+          color = "black")
+  
+
+
+
+  
+  
+# More:                             
 # Can this be filtered to only drug-related offenses?
 # Drug Equipment Violation (16), Drug Investigation (27), Narcotics (33), Drug/Narcotics Violation (62)
 
@@ -62,7 +139,7 @@ ggplot(crime) +
 #Robbery - Armed (29), Weapons Violations (45), Shots Fired/Illegal Hunting (120)
 
 
-# Arrests ----
+# Next steps----
 
 arrests <- read_csv("Desktop/Arrests.csv") %>%
   janitor::clean_names()
