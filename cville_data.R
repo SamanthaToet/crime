@@ -10,7 +10,7 @@ library(sf)
 # Crime ----
 # CRIME == CALLS != ARRESTS 
 
-# Get crime data from Open Data Portal api:
+# Get crime data from Open Data Portal api:https://opendata.charlottesville.org/datasets/crime-data/api
 
 crime_api <- "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/6/query?where=1%3D1&outFields=*&outSR=4326&f=json"
 response <- fromJSON(crime_api) #takes ~5 minutes, reads max 10k rows or approx only 2 years from 2020-2022
@@ -19,124 +19,195 @@ data_raw <- response$features$attributes %>%
   janitor::clean_names() %>%
   mutate(block_number = ifelse(block_number == "", NA, block_number)) %>%
   mutate(date_reported = date_reported %>% gsub('000$', '', .) %>% as.numeric() %>% as.POSIXct()) %>%
-  filter(date_reported < "2022-09-03 00:00:00") %>% #remove future dates 
+  filter(date_reported < as.Date(Sys.Date())) %>% #remove future dates 
   filter(block_number != "NA") #remove missing block numbers (6%)
 
 # Geocode:
-
 data_raw %<>% mutate(address = paste(block_number, street_name, "Charlottesville VA"))
-
 lon_lat <- geocode(data_raw$address) #takes ~10 minutes
 crime <- bind_cols(data_raw, lon_lat) %>%
-  filter(lon > -78.54, lat > 38.00 & lat < 38.08)
+  filter(lon > -78.54, lat > 38.00 & lat < 38.08) #9265
+
+# write_csv(crime, "crime.csv")
+crime <- read_csv("crime.csv")
+
+# Filter:
+drugs <- crime %>%
+  filter(grepl("Drug|Narcotics", offense)) #102 obs
+guns <- crime %>% 
+  filter(grepl("Robbery - Armed|Weapons Violations|Shots Fired/Illegal Hunting", offense)) #149 obs
+other <- crime %>%
+  filter(!grepl("Drug|Narcotics|Robbery - Armed|Weapons Violations|Shots Fired/Illegal Hunting", "offense"))
+
+# Density----
+
+cville_map <- get_map(c(left = -78.53, bottom = 38.00, right = -78.45, top = 38.07), maptype = "roadmap", color = "bw")
+
+# All crime:
+all_density <- ggmap(cville_map) +
+  stat_density2d(data = crime, aes(fill = ..level.., alpha = 0.1),
+                 geom = "polygon") +
+  theme(legend.position="none") +
+  scale_fill_viridis_c(direction = -1) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) +
+  ggtitle("All Crime Reports")
+
+# Drug calls:
+drug_density <- ggmap(cville_map) +
+  stat_density2d(data = drugs, aes(fill = ..level.., alpha = ..level..),
+                 geom = "polygon") +
+  theme(legend.position="none") +
+  scale_fill_viridis_c(direction = -1) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) +
+  ggtitle("Drug-Related")
+
+# Gun calls:
+gun_density <- ggmap(cville_map) +
+  stat_density2d(data = guns, aes(fill = ..level.., alpha = ..level..),
+                 geom = "polygon") +
+  theme(legend.position="none") +
+  scale_fill_viridis_c(direction = -1) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) +
+  ggtitle("Gun-Related")
+
+plot_grid(all_density, gun_density, drug_density, ncol = 3)
+
+
+# Census Blocks ----
 
 # Get census block data:
 census <- geojson_sf("US_Census_Tract_Area_2010.geojson") %>% 
   set_names(tolower)
 
-# Convert crime to sf:
-crime %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
-
-# Plot ----
-
 ggplot(census) + 
   geom_sf() + 
   guides(fill = guide_none()) #census base view
 
+# Convert to sf:
+
+crime %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
+drugs %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
+guns %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
+other %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
+
 # Filter to only census blocks:
+filter_census <- function(x) {
+  x %<>% mutate(within = st_within(x, census) %>% as.numeric()) 
+  x %<>% filter(!is.na(within))
+}
+
+filter_census(other)
+
 crime %<>% mutate(within = st_within(crime, census) %>% as.numeric()) 
 crime %<>% filter(!is.na(within))
 
+drugs %<>% mutate(within = st_within(drugs, census) %>% as.numeric()) 
+drugs %<>% filter(!is.na(within))
 
-ggplot(crime) +
-  geom_sf(alpha = .1, jitter = .1) +
-  geom_sf(data = census, fill = "blue", alpha = .1)
+guns %<>% mutate(within = st_within(guns, census) %>% as.numeric()) 
+guns %<>% filter(!is.na(within))
 
-# Add streets
-library(remotes)
-library(osmdata)
-library(rvest)
-getbb("Charlottesville Virginia")
-
-
-# Get features
-big_streets <- getbb("Charlottesville Virginia") %>%
-  opq() %>%
-  add_osm_feature(key = "highway",
-                  value = c("motorway", "primary", "motorway_link", "primary_link")) %>%
-  osmdata_sf()
-
-med_streets <- getbb("Charlottesville Virginia") %>%
-  opq() %>%
-  add_osm_feature(key = "highway",
-                  value = c("secondary", "tertiary", "secondary_link", "tertiary_link")) %>%
-  osmdata_sf()
-
-small_streets <- getbb("Charlottesville Virginia") %>%
-  opq() %>%
-  add_osm_feature(key = "highway",
-                  value = c("residential", "living_street","unclassified",
-                            "service", "footway")) %>%
-  osmdata_sf()
-
-water <- getbb("Charlottesville Virginia") %>%
-  opq() %>%
-  add_osm_feature(key = "waterway", value = c("river", "lake")) %>%
-  osmdata_sf()
-
-railway <- getbb("Charlottesville Virginia") %>%
-  opq() %>%
-  add_osm_feature(key = "railway", value = "rail") %>%
-  osmdata_sf()
-
-ggplot(crime) +
-  geom_sf(alpha = .1, jitter = .1) +
-  geom_sf(data = census, fill = "blue", alpha = .1) +
-  geom_sf(data = water$osm_lines,
-          inherit.aes = FALSE,
-          color = "steelblue",
-          size = .8,
-          alpha = .3) +
-  geom_sf(data = railway$osm_lines,
-          inherit.aes = FALSE,
-          color = "black",
-          size = .2,
-          linetype="dotdash",
-          alpha = .5) +
-  geom_sf(data = med_streets$osm_lines,
-          inherit.aes = FALSE,
-          color = "black",
-          size = .3,
-          alpha = .5) +
-  geom_sf(data = big_streets$osm_lines,
-          inherit.aes = FALSE,
-          color = "black",
-          size = .5,
-          alpha = .6) +
-  coord_sf(xlim = c(-78.54, -78.44), 
-           ylim = c(38.0, 38.08),
-           expand = FALSE)
-  
-  
+# View individual reports: 
+ggplot(sample_frac(other, 0.1)) +
+  geom_sf(jitter = .1, aes(color = 'Other'), alpha = .3) +
+  geom_sf(data = census, alpha = .1) +
+  geom_sf(data = drugs, aes(color = 'Drugs'), alpha = .3) +
+  geom_sf(data = guns, aes(color = 'Guns'), alpha = .3)
 
 
+# 2016 ----
 
-ggplot() +
-  geom_sf(data = streets$osm_lines,
-          inherit.aes = FALSE,
-          color = "black")
-  
+# *Drugs ----
 
+drug_raw <- read_csv("drug_raw.csv") %>%
+  janitor::clean_names() %>%
+  mutate(block_number = ifelse(block_number == "", NA, block_number)) %>%
+  mutate(date_reported = date_reported %>% gsub('000$', '', .) %>% as.numeric() %>% as.POSIXct()) %>%
+  filter(block_number != "NA") #remove missing block numbers
 
+drug_raw %<>% mutate(address = paste(block_number, street_name, "Charlottesville VA"))
+lon_lat_drugs <- geocode(drug_raw$address) 
+drug_data <- bind_cols(drug_raw, lon_lat_drugs) %>%
+  filter(lon > -78.54, lat > 38.00 & lat < 38.08)
 
-  
-  
-# More:                             
-# Can this be filtered to only drug-related offenses?
-# Drug Equipment Violation (16), Drug Investigation (27), Narcotics (33), Drug/Narcotics Violation (62)
+drug_data %<>% st_as_sf(coords = c("lon", "lat"), crs = st_crs(census))
+filter_census(drug_data)
 
-# Can this be filtered to only gun-related offenses? # CAVEAT
-#Robbery - Armed (29), Weapons Violations (45), Shots Fired/Illegal Hunting (120)
+#write_csv(drug_data, "drug_data.csv")
+drug_data <- read_csv("drug_data.csv")
+
+#crime %<>% mutate(drug_flag = ifelse(grepl("Drug|Narcotics", offense, ignore.case = TRUE), "drugs", "not_drugs"))
+#filter(crime, drug_flag == "drugs") %>% with(table(offense))
+
+drug_counts <- drug_data %>%
+  group_by(address) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(n)
+
+ggplot(drug_counts) +
+  geom_sf(data = census) +
+  geom_sf(aes(size = n, color = n, alpha = n))
+
+# *Violence----
+# Assault:
+crime %<>% mutate(assault_flag = ifelse(grepl("Assault", offense, ignore.case = TRUE),
+                                     "assault", "not_assault"))
+
+filter(crime, assault_flag == "assault") %>% with(table(offense))
+
+assault_counts <- crime %>%
+  group_by(address, assault_flag) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(n)
+
+ggplot(assault_counts) +
+  geom_sf(data = census) +
+  geom_sf(aes(size = n, color = n, alpha = n)) +
+  facet_wrap(~assault_flag)
+
+#Guns: 
+crime %<>% mutate(gun_flag = ifelse(grepl("Robbery - Armed|Weapons Violations|Shots Fired/Illegal Hunting", 
+                                          offense, ignore.case = TRUE), "guns", "not_guns"))
+
+filter(crime, gun_flag == "guns") %>% with(table(offense))
+
+gun_counts <- crime %>%
+  group_by(address, gun_flag) %>% 
+  count() %>%
+  ungroup() %>% 
+  arrange(n)
+
+ggplot(gun_counts) +
+  geom_sf(data = census) +
+  geom_sf(aes(size = n, color = n, alpha = n)) +
+  facet_wrap(~gun_flag)
+
+# Frequent addresses ----
+station_props <- arrange(drug_counts, -n) %>%
+  add_count(wt = n) 
+
+all_counts <- crime %>%
+  group_by(address) %>%
+  count() %>%
+  ungroup() %>%
+  arrange(n)
 
 
 # Next steps----
