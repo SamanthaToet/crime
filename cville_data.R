@@ -22,6 +22,13 @@ data_raw <- response$features$attributes %>%
   filter(date_reported < as.Date(Sys.Date())) %>% #remove future dates 
   filter(block_number != "NA") #remove missing block numbers (6%)
 
+
+# Get just gun-related data from ODP: weapons, armed, shots
+gun_api <- "https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/6/query?where=Offense%20%3D%20'%25ARMED%25'&outFields=*&outSR=4326&f=json"
+gun_response <- fromJSON(gun_api)
+gun_raw <- gun_response$fields
+  
+  
 # Geocode:
 data_raw %<>% mutate(address = paste(block_number, street_name, "Charlottesville VA"))
 lon_lat <- geocode(data_raw$address) #takes ~10 minutes
@@ -217,17 +224,6 @@ arrests <- read_csv("Desktop/Arrests.csv") %>%
 
 table(arrests$statute_description) %>% sort()
 
-#DRUGS: POSSESS SCH I OR II (131), DRUG:SELL-DISTRIBUTE-MANUFACTURE: TYPE NOT CLEAR (43), 
-#DRUGS: POSSESS W/INTENT TO MANUF/SELL SCH I, II (26), FIREARM: POSSESSION W/ SCH I OR II DRUG (18),
-#DRUG/NARCOTICS VIOLATIONS (16), DRUGS: POSSESS MARIJUANA, 1ST OFF (10), DRUGS: POSSESS MARIJUANA, 2+ OFF (8),
-#DRUGS: DISTRIB/PWI MARIJUANA >1/2 OZ TO 5 LBS (8),  MARIJUANA SYNTHETIC:POSSES CANNABIMIMETIC AGENT (6),
-#DRUGS: DISTRIB/PWI MARIJUANA <1/2 OZ (6), Under the Influence of Marijuana (3), DRUGS: MANUFACTURE/DISTRIBUTE SCH I, II, 2 OFF (3),
-# DRUG PARAPHERNALIA: SELL/POSSESS TO SELL, DRUGS: POSSESS SCH IV,  DRUGS: POSSESS SCH III, DRUGS: INHALING DRUGS OR NOXIOUS CHEMICALS,
-# DRUGS: TRANSPORT TO VA 5+ LBS MARIJUANA,  DRUGS: MANUFACTURE/DISTRIBUTE SCH III, IV OR V
-
-
-
-
 
 #FIREARM: POSSESS BY FELON NONVIOLENT W/IN 10 YRS (76), FIREARM/ETC: POINTING/BRANDISHING (73), 
 #FIREARM: USE IN COMMISSION OF FELONY, 1ST OFF (42), FIREARM: RECKLESS HANDLING (29), 
@@ -250,9 +246,55 @@ table(arrests$statute_description) %>% sort()
 
 
 
+# Live gun API ----
+
+gun_where_clause <- "%28Offense%20LIKE%20'%shot%'%29OR%28Offense%20LIKE%20'%armed%'%29OR%28Offense%20LIKE%20'%weapon%'%29"
+gun_api <- glue::glue("https://gisweb.charlottesville.org/arcgis/rest/services/OpenData_2/MapServer/6/query?where={gun_where_clause}&outFields=*&outSR=4326&f=json")
+gun_response <- fromJSON(gun_api)
+
+gun_data <- gun_response$features$attributes%>% #512 obs
+  janitor::clean_names() %>%
+  mutate(block_number = ifelse(block_number == "", NA, block_number)) %>%
+  mutate(date_reported = date_reported %>% gsub('000$', '', .) %>% as.numeric() %>% as.POSIXct())
+
+
+#TODO - mechanism for missing block numbers (17%)
 
 
 
 
+# Leaflet ----
+
+gun_calls <- read_csv("data/guns.csv") %>%
+  janitor::clean_names() %>%
+  mutate(date_reported = as.Date(date_reported)) %>%
+  mutate(address = paste(block_number, street_name, "Charlottesville VA"))
+
+lon_lat_gun <- geocode(gun_calls$address)
+gun_data <- bind_cols(gun_calls, lon_lat_gun)
 
 
+# Density map
+ggmap(cville_map) +
+ stat_density2d(data = gun_data, aes(fill = ..level..), alpha = 0.4,
+               geom = "polygon") +
+  theme(legend.position="none") +
+  scale_fill_viridis_c(direction = -1) +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank()) +
+  labs(title = "Gun-Related Calls to the Charlottesville Police Department",
+       subtitle = "Feb 2019 - Jan 2024", 
+       caption = "n = 457")
+# TODO: figure out 51 rows containing non-finite values
+
+# Interactive map 
+
+map <- leaflet() %>%
+  setView(lng = -78.49, lat = 38.03, zoom = 13) %>%
+  addTiles()
+
+map
